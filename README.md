@@ -1,12 +1,13 @@
 # claude-kit
 
-Three customizations for [Claude Code](https://claude.com/claude-code) that I use every day. Each one stands alone: install one, two or all three.
+Four customizations for [Claude Code](https://claude.com/claude-code) that I use every day. Each one stands alone: install any of them.
 
 | Folder | What it is |
 |---|---|
 | [`model-band/`](model-band/) | A status line mod: model, limits and context at a glance, plus one row per running agent. |
 | [`brain/`](brain/) | Shared notes every Claude session reads, for facts that cross repos, kept fresh by a weekly check. |
 | [`output-style/`](output-style/) | The `adhd` output style: answer first, short bullets, safety caveats never cut, plus a linter for it. |
+| [`review-loop/`](review-loop/) | A skill: review and fix in rounds, a fresh reviewer each time, until a round finds no significant bugs. |
 
 Built and used on macOS. Needs `jq`.
 
@@ -53,6 +54,17 @@ The `adhd` output style changes how Claude writes, not how it codes:
 `reply-lint` scores a reply against the style (`reply-lint --check reply.md`): length, bold first line, bullet length, stray icons, second summaries, narration and more. `./test.sh` runs its cases.
 
 Install and details: [output-style/README.md](output-style/README.md).
+
+## review-loop: review and fix until a fresh review is clean
+
+A skill (`/review-loop`) that runs review → verify → fix → re-check in rounds:
+
+- A **fresh reviewer agent** every round, so it doesn't anchor on earlier fixes.
+- **Bigger bugs only** (security, data loss, crashes, broken builds, wrong behaviour); nits are listed, not fixed. Docs get their own bar.
+- Every finding is **verified against the code** before a fix; rejected ones are reported with the reason.
+- Round 1 is a cheap Haiku sweep; only a **Sonnet round can call it clean**. Stops when clean, at 5 rounds, or when stuck.
+
+Install and details: [review-loop/README.md](review-loop/README.md).
 
 ---
 
