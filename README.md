@@ -31,7 +31,7 @@ Needs a Nerd Font for the powerline arrows. Install and details: [model-band/REA
 
 Project memory sees one repo. The brain holds the links between them: which service reads which spec, how a release in one repo reaches another, tooling quirks you verified once and don't want to rediscover.
 
-- **What:** a plain folder of Markdown in `~/brain` (opens as an Obsidian vault), a local git repo with no remote.
+- **What:** a plain folder of Markdown in `~/brain`, a local git repo with no remote. Obsidian is optional: Claude reads the files directly; open the folder as a vault only if you want a graph and clickable links.
 - **Read:** its `index.md` is imported into every session from `~/.claude/CLAUDE.md`. A note opens only when its index line matches the task.
 - **Write:** one topic per note, every claim dated (`verified:`) and sourced (`source:`). No secrets, no copies of repo docs. Rules in [brain/RULES.md](brain/RULES.md).
 - **Reminder:** a Stop hook asks each longer session (15+ tool calls) once whether it verified something worth a note. It never loops.

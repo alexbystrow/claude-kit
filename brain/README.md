@@ -1,6 +1,6 @@
 # Brain
 
-Shared notes that every Claude Code session on your machine reads. Project memory sees one repo; the brain holds what crosses repos or outlives a session: release chains, which service reads which spec, tooling quirks. It is a plain folder of Markdown (works as an Obsidian vault) in a local git repo.
+Shared notes that every Claude Code session on your machine reads. Project memory sees one repo; the brain holds what crosses repos or outlives a session: release chains, which service reads which spec, tooling quirks. It is a plain folder of Markdown in a local git repo. Obsidian is optional: nothing here needs it, but the folder opens as a vault if you want a graph view and clickable `[[links]]`.
 
 ## How it works
 
