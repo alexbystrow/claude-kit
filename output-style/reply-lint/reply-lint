@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""reply-lint: check Claude's last chat reply against the adhd output style (v10.1).
+
+Stop hook (stdin = hook JSON): logs every reply's result to ~/.local/state/reply-lint/log.jsonl. Log-only by
+default: a block makes Claude send the whole reply a second time below the first, which the reader sees as two
+replies. REPLY_LINT_BLOCK=1 brings back the old once-per-session rewrite.
+  reply-lint --report [days]   counts per rule over the last N days (default 7)
+  reply-lint --check FILE      lint a Markdown file and print the violations (for tests)
+Never logs reply text, only rule ids and counts. Never fails the hook: any error exits quietly. See README.md.
+"""
+import json, os, re, sys, time
+
+STATE = os.path.expanduser(os.environ.get("REPLY_LINT_DIR", "~/.local/state/reply-lint"))
+LOG = os.path.join(STATE, "log.jsonl")
+BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+FILES = re.compile(r"^\s*\**Files:")
+TAIL_BYTES = 4 * 1024 * 1024
+# Process narration the style forbids ("results, not process"). Evidence such as "git cherry showed" is fine.
+NARRATION = re.compile(r"\b(I read (it|the file|them|that) back|reading it back|I did(n[’']t| not) change anything|"
+                       r"I changed nothing|I made no changes|I went through|I looked (at|into)|"
+                       r"I only (fetched|read|looked)|I didn[’']t (pull|delete|touch|modify)|Let me)\b", re.I)
+MONEY = re.compile(r"[€£]\s?\d|\d\s?[€£]|\bUS\$\s?\d|\b\d+([.,]\d+)?[kKmM]?\s?(USD|EUR|GBP)\b|(?<![\w$])\$(\d{2,}|\d[.,]\d)|\b(USD|EUR|GBP)\s?\d|\b\d+([.,]\d+)?\s?(USD|EUR|GBP|dollars?|euros?)\b", re.I)
+# Only reader-facing estimates ("which takes about 2 minutes"), not measured durations ("the export takes 3 seconds").
+TIME_PROSE = re.compile(r"\b(will take|should take|which takes|that takes|it'?ll take|takes me|takes about|taking about)"
+                        r"\s+(me\s+)?(about|around|roughly)?\s*\d+([.,]\d+)?\s*"
+                        r"(minutes?|mins?|seconds?|hours?)\b", re.I)
+
+
+def plain(line):
+    return re.sub(r"`[^`]*`", "x", line)  # a code span (path, command) counts as one word and is never prose
+
+
+def words(line):
+    return len(re.sub(r"[*_#>|]", " ", BULLET.sub("", plain(line))).split())
+
+
+ICON = re.compile("[\U0001F000-\U0001FAFF\u2600-\u2712\u2719-\u27BF\u2B50\u2B55]")  # ✓ ✔ ✗ ✘ are text
+ALLOWED = {"\u2705", "\u26a0", "\u274c"}  # ✅ ⚠ ❌ (⚠ with or without U+FE0F)
+SUMMARY = re.compile(r"^\s*(?:[-*+]\s+)?\**(Takeaway|TL;DR|Das Wichtigste|Summary|Full detail)\b", re.I)
+
+
+def lint(text):
+    lines, fence, raw_n, first = [], None, 0, None
+    tables, cur = [], []  # each table is a run of consecutive `|` lines outside code
+    for raw in text.splitlines():
+        if cur and (fence is not None or not raw.lstrip().startswith("|")):
+            tables.append(cur)
+            cur = []
+        if raw.strip():
+            raw_n += 1
+        m = FENCE.match(raw)
+        if fence is None and m:
+            fence = m.group(1)
+            first = first or "special"
+            lines.append("<code>")  # a code block counts as one line of the reply
+            continue
+        if fence is not None:
+            # CommonMark: only a fence of the same character, at least as long and with nothing after it, closes
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not raw[m.end():].strip():
+                fence = None
+            continue
+        if raw.lstrip().startswith(">"):  # quoted past replies are exempt
+            first = first or "special"
+            continue
+        if raw.strip():
+            lines.append(raw.rstrip())
+            first = first or raw.strip()
+            if raw.lstrip().startswith("|"):
+                cur.append(raw.rstrip())
+    if cur:
+        tables.append(cur)
+    out = []
+    body = [l for l in lines if not FILES.match(l) and l != "<code>"]
+    if not body:
+        return out
+    bullets = [l for l in body if BULLET.match(l)]
+
+    if first != "special" and not first.startswith("**"):
+        out.append("bold-first:the first line is the answer, in bold")
+    files_at = next((i for i, l in enumerate(lines) if FILES.match(l)), None)
+    if files_at is not None and files_at < len(lines) - 1:
+        out.append("files-not-last:the Files: line goes last")
+    icons = set()
+    for i, l in enumerate(body):
+        p = plain(l)
+        if SUMMARY.match(p) or (l.strip() == "---" and i + 1 < len(body) and SUMMARY.match(plain(body[i + 1]))):
+            out.append("second-summary:no Takeaway, TL;DR or Full-detail layer")
+        icons.update(c for c in ICON.findall(p) if c not in ALLOWED)
+        exempt = "❌" in l or "⚠" in l or l.lstrip("- ").startswith("**I was wrong:**")  # failures, corrections
+        m = None if exempt else NARRATION.search(p)
+        if m:
+            out.append(f"narration:\"{m.group(0)}\" (results, not process)")
+        if MONEY.search(p):
+            out.append("money:no money figures in replies")
+        m = TIME_PROSE.search(p)
+        if m:
+            out.append(f"time-form:\"{m.group(0)}\" (write (~N min))")
+    if icons:
+        out.append(f"icon-other:{''.join(sorted(icons))} (icons only ✅ ⚠️ ❌)")
+    rec = next((i for i, l in enumerate(body) if re.search(r"\bI recommend \**(option )?\d", plain(l), re.I)), None)
+    if rec is not None and not any(plain(l).rstrip(" *").endswith("?") for l in body[rec:]):
+        out.append("decision-question:after \"I recommend\" comes one yes/no question")
+    if len(lines) > 15:
+        out.append(f"length:{len(lines)} lines (about 15)")
+    top = [b for b in bullets if not b.startswith((" ", "\t"))]
+    if re.search(r"github\.com/[^/\s]+/[^/\s]+/pull/\d+", text) and len(top) > 5:
+        out.append(f"pr-report-long:{len(top)} bullets in a PR report (max 5, detail goes in the PR)")
+    for b in bullets:
+        if words(b) > 25:
+            out.append(f"bullet-long:{words(b)} words (max 25)")
+        if plain(b).count("**") // 2 > 1:
+            out.append("bold-many:more than one bold phrase in a bullet")
+    cells = lambda r: plain(r).strip().strip("|").split("|")
+    for table in tables:  # each table on its own
+        cols = max(len(cells(r)) for r in table)
+        data = [r for r in table if not re.fullmatch(r"[|:\-\s]+", r.strip())]
+        if cols > 4 or len(data) - 1 > 8:
+            out.append(f"table-wide:{cols} columns, {len(data) - 1} rows (max 4 x 8)")
+        longest = max((words(c) for r in data for c in cells(r)), default=0)
+        if longest > 12:
+            out.append(f"table-cell-long:a cell has {longest} words (max 12)")
+    return list(dict.fromkeys(out))
+
+
+def last_reply(hook):
+    text = hook.get("last_assistant_message")
+    if isinstance(text, str) and text.strip():
+        return text
+    path = hook.get("transcript_path")
+    if not isinstance(path, str) or not path:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            start = max(0, f.tell() - TAIL_BYTES)
+            f.seek(start)
+            tail = f.read().decode("utf-8", errors="replace").splitlines()
+            if start:
+                tail = tail[1:]  # the first line was cut by the seek
+    except OSError:
+        return ""
+    for line in reversed(tail):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("type") != "assistant":
+            continue
+        msg = ev.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        parts = [c.get("text", "") for c in content
+                 if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)]
+        if parts:
+            return "\n".join(parts)
+    return ""
+
+
+def hook():
+    if os.environ.get("REPLY_LINT_SKIP") or os.environ.get("BRAIN_MAINT"):
+        return
+    try:
+        data = json.load(sys.stdin)
+    except (ValueError, UnicodeDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    text = last_reply(data)
+    if not text.strip():
+        return
+    found = lint(text)
+    sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(data.get("session_id") or ""))[:80]
+    resent = bool(data.get("stop_hook_active"))
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": int(time.time()), "session": sid, "cwd": str(data.get("cwd", "")),
+                                "resent": resent, "rules": [v.split(":", 1)[0] for v in found]}) + "\n")
+    except OSError:
+        pass
+    if not found or resent or not sid or os.environ.get("REPLY_LINT_BLOCK") != "1":
+        return
+    marker = os.path.join(STATE, "asked", sid)
+    try:  # claim the one ask atomically first: no marker, no block (else an unwritable dir blocks every turn)
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        open(marker, "x").close()
+    except OSError:
+        return
+    print(json.dumps({"decision": "block", "reason":
+        "Reply lint (asked once per session): your last reply breaks the adhd output style: "
+        + "; ".join(found)
+        + ". Send the reply again in the right shape, shorter, with the same content. Don't mention the lint."}))
+    sys.stdout.flush()
+
+
+def report(days):
+    since = time.time() - days * 86400
+    total, bad, per = 0, 0, {}
+    try:
+        with open(LOG, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict) or ev.get("ts", 0) < since or ev.get("resent"):
+                    continue
+                total += 1
+                rules = ev.get("rules") if isinstance(ev.get("rules"), list) else []
+                bad += bool(rules)
+                for r in rules:
+                    per[r] = per.get(r, 0) + 1
+    except OSError:
+        pass
+    print(f"last {days} days: {total} replies, {bad} with a violation" + (f" ({100 * bad // total} %)" if total else ""))
+    for r, n in sorted(per.items(), key=lambda x: -x[1]):
+        print(f"  {r:22} {n}")
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    try:
+        if a[:1] == ["--report"]:
+            report(int(a[1]) if len(a) > 1 and a[1].isdigit() else 7)
+        elif a[:1] == ["--check"] and len(a) > 1:
+            with open(a[1], encoding="utf-8", errors="replace") as f:
+                print("\n".join(lint(f.read())) or "clean")
+        else:
+            hook()
+    except Exception as e:  # a Stop hook must never break the session
+        print(f"reply-lint: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(0)

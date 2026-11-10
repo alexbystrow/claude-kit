@@ -1,0 +1,6 @@
+{
+  "name": "model-band",
+  "version": "0.1.0",
+  "description": "A live band above the prompt: which model leads, which workers run, advisor calls and what it costs.",
+  "types": "./types/index.d.ts"
+}
